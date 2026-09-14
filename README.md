@@ -51,6 +51,24 @@ Quem consegue gravar a chave processa o pagamento. Quem não consegue recebe uma
 resposta **409 Conflict**, indicando que aquela fatura já está sendo processada
 naquele exato momento.
 
+### A liberação também precisa de cuidado
+
+Na hora de liberar a trava não basta simplesmente apagar a chave. Considere esta
+sequência problemática:
+
+1. A requisição A pega a trava e começa a processar.
+2. O processamento de A demora mais que os 10 segundos, e a trava expira.
+3. A requisição B pega a trava, porque a chave estava livre.
+4. A requisição A termina e manda apagar a chave.
+
+No passo 4, a requisição A apagaria a trava que agora pertence à B. Para evitar
+isso, cada trava guarda um **token único** que identifica o seu dono, e a
+liberação só acontece se o token informado for igual ao que está gravado.
+
+Essa verificação é feita por um pequeno script em Lua executado pelo próprio
+Redis, porque o Redis roda o script inteiro sem interrupção. Isso garante que
+nada aconteça entre "conferir o dono" e "apagar a chave".
+
 ## Endpoints disponíveis
 
 | Método | Rota                      | O que faz                                              |
@@ -59,7 +77,132 @@ naquele exato momento.
 | GET    | `/pagamentos/:faturaId`   | Consulta um pagamento já processado                    |
 | GET    | `/health`                 | Informa se a API e o Redis estão saudáveis             |
 
-## Como executar
+### Respostas do POST /pagamentos
 
-As instruções completas de execução local, via Docker Compose e de cada suíte de
-testes são detalhadas ao longo do desenvolvimento do projeto.
+| Código | Quando acontece                                              |
+| ------ | ------------------------------------------------------------ |
+| 201    | O pagamento foi processado com sucesso                       |
+| 200    | A fatura já havia sido paga antes (idempotência)             |
+| 400    | Os campos "faturaId" ou "valor" estão ausentes ou inválidos  |
+| 409    | A fatura já está sendo processada por outra requisição       |
+
+## Estrutura do projeto
+
+```
+src/
+  redis.js            cria a conexão com o Redis
+  servicoDeTrava.js   adquire e libera a trava distribuída
+  app.js              monta a aplicação Express e as rotas
+  servidor.js         ponto de entrada que sobe o servidor
+testes/
+  trava.unit.test.js            testes unitários (Redis simulado)
+  pagamentos.integration.test.js testes de integração (Redis real)
+```
+
+## Como executar com Docker Compose (jeito mais simples)
+
+O Compose sobe a API e o Redis juntos, com um comando só. Não é preciso ter o
+Node.js nem o Redis instalados na máquina, apenas o Docker.
+
+```bash
+docker compose up -d
+```
+
+A API fica disponível em `http://localhost:3001`. Para conferir se subiu:
+
+```bash
+docker ps
+curl http://localhost:3001/health
+```
+
+Para encerrar:
+
+```bash
+docker compose down
+```
+
+### Vendo a trava funcionar na prática
+
+Com a aplicação no ar, dispare duas requisições ao mesmo tempo para a mesma
+fatura. O `&` no final de cada linha faz as duas correrem em paralelo:
+
+```bash
+curl -X POST http://localhost:3001/pagamentos \
+  -H 'Content-Type: application/json' \
+  -d '{"faturaId":"FATURA-DEMO","valor":150}' &
+curl -X POST http://localhost:3001/pagamentos \
+  -H 'Content-Type: application/json' \
+  -d '{"faturaId":"FATURA-DEMO","valor":150}' &
+wait
+```
+
+Uma das requisições responde **201** (pagamento processado) e a outra responde
+**409** (barrada pela trava). É exatamente esse o comportamento que o projeto
+quer demonstrar: a pessoa não é cobrada duas vezes.
+
+## Como executar localmente (sem Docker)
+
+Neste caso é preciso ter o Node.js instalado e um Redis disponível.
+
+```bash
+# 1. Instalar as dependências
+npm install
+
+# 2. Subir um Redis (caso ainda não tenha um)
+docker run -d -p 6379:6379 redis:7-alpine
+
+# 3. Iniciar a aplicação
+npm start
+```
+
+A API sobe em `http://localhost:3000`. O endereço do Redis pode ser alterado
+pela variável de ambiente `REDIS_URL`.
+
+## Como rodar os testes
+
+O projeto tem dois níveis de teste, com propósitos diferentes.
+
+### Testes unitários
+
+Usam a biblioteca `ioredis-mock`, que simula o Redis em memória. Por isso rodam
+em qualquer lugar, sem precisar de nenhum serviço externo:
+
+```bash
+npm run test:unit
+```
+
+### Testes de integração
+
+Rodam contra um Redis de verdade, comprovando o comportamento real do `SET NX`
+e do script Lua. É aqui que fica o teste das duas requisições simultâneas:
+
+```bash
+# Sobe um Redis para os testes
+docker run -d --name redis-teste -p 6379:6379 redis:7-alpine
+
+npm run test:integration
+
+# Ao terminar, remove o container
+docker rm -f redis-teste
+```
+
+## CI/CD com GitHub Actions
+
+O repositório tem dois workflows configurados:
+
+- **CI** (`.github/workflows/ci.yml`) — roda a cada push e a cada Pull Request.
+  Executa os testes unitários, os testes de integração (com um Redis subido
+  automaticamente pelo GitHub como _service container_) e, se tudo passar,
+  confirma que a imagem Docker continua sendo construída sem erros.
+- **CD** (`.github/workflows/cd.yml`) — roda quando o código chega no branch
+  `main`. Constrói a imagem Docker e a publica no GitHub Container Registry.
+
+## Sobre a imagem Docker
+
+O `Dockerfile` usa build em múltiplos estágios: um estágio instala as
+dependências e outro monta a imagem final, que fica menor por não carregar nada
+além do necessário para executar.
+
+A aplicação roda com o usuário `node`, sem privilégios de administrador, e a
+imagem tem um `HEALTHCHECK` que consulta a rota `/health` periodicamente para
+que o Docker saiba se a aplicação está realmente saudável.
