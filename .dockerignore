@@ -1,0 +1,32 @@
+# Arquivos que NAO devem ser copiados para dentro da imagem Docker.
+#
+# Isso deixa o build mais rapido (menos arquivos para enviar ao Docker) e a
+# imagem final mais limpa e segura.
+
+# As dependencias sao instaladas dentro do proprio container pelo "npm ci",
+# entao copiar a pasta local so atrapalharia (ela pode ter sido compilada para
+# outro sistema operacional).
+node_modules/
+
+# Historico do Git nao tem utilidade dentro da imagem.
+.git/
+.gitignore
+
+# Os testes nao rodam dentro da imagem de producao.
+testes/
+
+# Configuracoes de CI/CD sao usadas pelo GitHub, nao pela aplicacao.
+.github/
+
+# Arquivos de ambiente e logs
+.env
+.env.local
+*.log
+
+# Documentacao e arquivos de apoio
+README.md
+docker-compose.yml
+coverage/
+
+# Arquivos de sistema operacional
+.DS_Store

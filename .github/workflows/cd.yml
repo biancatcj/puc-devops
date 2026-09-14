@@ -1,0 +1,69 @@
+# Workflow de Entrega Continua (CD).
+#
+# Enquanto o CI responde "o codigo esta funcionando?", o CD cuida de empacotar e
+# publicar a aplicacao. Aqui construimos a imagem Docker e a enviamos para o
+# GitHub Container Registry (GHCR), que e o registro de imagens do proprio
+# GitHub.
+#
+# Este workflow so roda quando o codigo chega no branch main, ou seja, depois
+# que uma Pull Request e aprovada e mesclada.
+
+name: CD
+
+on:
+  push:
+    branches: [main]
+  # Tambem roda nas Pull Requests, mas apenas construindo a imagem (sem
+  # publicar). Assim conseguimos ver o CD passando com sucesso na PR.
+  pull_request:
+  # Permite disparar o workflow manualmente pela interface do GitHub, o que e
+  # util para republicar a imagem sem precisar fazer um novo commit.
+  workflow_dispatch:
+
+jobs:
+  publicar-imagem:
+    name: Publica a imagem no GHCR
+    runs-on: ubuntu-latest
+
+    # Por padrao o token do workflow so tem permissao de leitura. Como vamos
+    # publicar um pacote, precisamos pedir a permissao de escrita explicitamente.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Baixa o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Faz login no GitHub Container Registry
+        # Em Pull Requests nao publicamos a imagem, entao o login nao e
+        # necessario (e o token da PR e somente de leitura).
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Este token e gerado automaticamente pelo GitHub para cada execucao.
+          # Nao precisamos cadastrar nenhuma senha manualmente.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Converte o nome do repositorio para letras minusculas
+        # O GHCR exige que o nome da imagem esteja todo em minusculas, mas o
+        # nome de usuario do GitHub pode ter letras maiusculas. Esta conversao
+        # evita um erro na hora de publicar.
+        id: nome
+        run: echo "imagem=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Constroi e publica a imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Publica somente quando o codigo chega na main. Na PR a imagem e
+          # apenas construida, para validar que o Dockerfile continua correto.
+          push: ${{ github.event_name != 'pull_request' }}
+          # Publicamos com duas etiquetas: "latest", que sempre aponta para a
+          # versao mais recente, e o codigo do commit, que permite voltar a uma
+          # versao especifica caso algo de errado.
+          tags: |
+            ${{ steps.nome.outputs.imagem }}:latest
+            ${{ steps.nome.outputs.imagem }}:${{ github.sha }}

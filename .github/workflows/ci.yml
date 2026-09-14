@@ -1,0 +1,97 @@
+# Workflow de Integracao Continua (CI).
+#
+# A cada envio de codigo ou abertura de Pull Request, o GitHub executa este
+# arquivo automaticamente. A ideia da integracao continua e justamente essa:
+# descobrir problemas assim que o codigo e enviado, e nao semanas depois.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Primeiro trabalho: os testes unitarios.
+  # Eles usam o Redis simulado em memoria, por isso nao precisam de nenhum
+  # servico externo e sao bem rapidos.
+  testes-unitarios:
+    name: Testes unitarios
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixa o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Prepara o ambiente do Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # Guarda em cache as dependencias do npm para acelerar as proximas
+          # execucoes do workflow.
+          cache: 'npm'
+
+      - name: Instala as dependencias
+        # Usamos "npm ci" em vez de "npm install" porque ele respeita
+        # exatamente o package-lock.json, garantindo que o CI rode com as
+        # mesmas versoes testadas na maquina local.
+        run: npm ci
+
+      - name: Executa os testes unitarios
+        run: npm run test:unit
+
+  # Segundo trabalho: os testes de integracao.
+  # Estes precisam de um Redis de verdade, e o GitHub Actions oferece os
+  # "service containers" exatamente para isso: ele sobe o Redis antes do
+  # trabalho comecar e o desliga ao final, automaticamente.
+  testes-de-integracao:
+    name: Testes de integracao
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        # O GitHub so comeca a rodar os passos abaixo depois que esta
+        # verificacao confirmar que o Redis esta respondendo.
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Baixa o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Prepara o ambiente do Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Instala as dependencias
+        run: npm ci
+
+      - name: Executa os testes de integracao
+        run: npm run test:integration
+        env:
+          # Endereco do Redis que o proprio GitHub Actions subiu para nos.
+          REDIS_URL: redis://127.0.0.1:6379
+
+  # Terceiro trabalho: confirmar que a imagem Docker continua sendo construida
+  # sem erros. Nao adianta os testes passarem se a aplicacao nao empacota.
+  build-da-imagem:
+    name: Build da imagem Docker
+    runs-on: ubuntu-latest
+    # So faz sentido gastar tempo montando a imagem se os testes passaram.
+    needs: [testes-unitarios, testes-de-integracao]
+
+    steps:
+      - name: Baixa o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Constroi a imagem Docker
+        run: docker build -t api-pagamentos:${{ github.sha }} .
