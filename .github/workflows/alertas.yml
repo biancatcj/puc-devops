@@ -1,0 +1,105 @@
+# Workflow de envio de alertas.
+#
+# Ate aqui os workflows cuidavam de testar (CI) e empacotar (CD) a aplicacao.
+# Este cuida de avisar: sempre que algo importante acontece no repositorio, uma
+# mensagem e enviada para um grupo no Telegram.
+#
+# A ideia vem da pratica de observabilidade: nao basta o pipeline funcionar, a
+# equipe precisa ficar sabendo do resultado sem precisar abrir o GitHub a todo
+# momento.
+
+name: Alertas
+
+on:
+  # Primeiro gatilho: o termino do workflow de CI. Usamos workflow_run porque
+  # ele roda DEPOIS do outro workflow, e so assim conseguimos saber se os
+  # testes passaram ou falharam. Este gatilho dispara a partir do branch
+  # principal do repositorio.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  # Segundo gatilho: a abertura e o fechamento de uma Pull Request. O tipo
+  # "closed" cobre tanto a PR mesclada quanto a descartada, e mais abaixo
+  # diferenciamos uma da outra.
+  pull_request:
+    types: [opened, closed]
+
+jobs:
+  enviar-alerta:
+    name: Envia o alerta no Telegram
+    runs-on: ubuntu-latest
+
+    steps:
+      # Primeiro montamos o texto da mensagem de acordo com o que aconteceu.
+      # Os dados do evento chegam como variaveis de ambiente para que o shell
+      # nao receba texto vindo de fora diretamente dentro do script.
+      - name: Monta o texto da mensagem
+        id: mensagem
+        env:
+          EVENTO: ${{ github.event_name }}
+          REPOSITORIO: ${{ github.repository }}
+          RESULTADO_DO_CI: ${{ github.event.workflow_run.conclusion }}
+          BRANCH_DO_CI: ${{ github.event.workflow_run.head_branch }}
+          ENDERECO_DO_CI: ${{ github.event.workflow_run.html_url }}
+          NUMERO_DA_PR: ${{ github.event.number }}
+          TITULO_DA_PR: ${{ github.event.pull_request.title }}
+          ENDERECO_DA_PR: ${{ github.event.pull_request.html_url }}
+          PR_FOI_MESCLADA: ${{ github.event.pull_request.merged }}
+          ACAO_DA_PR: ${{ github.event.action }}
+        run: |
+          if [ "$EVENTO" = "workflow_run" ]; then
+            # O CI terminou. A conclusao pode ser success, failure, cancelled
+            # e alguns outros valores, por isso tratamos o sucesso e deixamos
+            # o restante como falha.
+            if [ "$RESULTADO_DO_CI" = "success" ]; then
+              icone="✅"
+              titulo="CI passou"
+            else
+              icone="❌"
+              titulo="CI falhou ($RESULTADO_DO_CI)"
+            fi
+            texto="$icone <b>$titulo</b>"$'\n'"repositorio: $REPOSITORIO"$'\n'"branch: $BRANCH_DO_CI"$'\n'"$ENDERECO_DO_CI"
+          elif [ "$ACAO_DA_PR" = "opened" ]; then
+            texto="🔀 <b>PR aberta</b> #$NUMERO_DA_PR"$'\n'"$TITULO_DA_PR"$'\n'"$ENDERECO_DA_PR"
+          elif [ "$PR_FOI_MESCLADA" = "true" ]; then
+            texto="🎉 <b>PR mesclada</b> #$NUMERO_DA_PR"$'\n'"$TITULO_DA_PR"$'\n'"$ENDERECO_DA_PR"
+          else
+            texto="🚫 <b>PR fechada sem merge</b> #$NUMERO_DA_PR"$'\n'"$TITULO_DA_PR"$'\n'"$ENDERECO_DA_PR"
+          fi
+
+          {
+            echo "texto<<FIM_DA_MENSAGEM"
+            echo "$texto"
+            echo "FIM_DA_MENSAGEM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Envia a mensagem para o Telegram
+        env:
+          # O token do bot e o identificador do grupo ficam guardados como
+          # secrets do repositorio. Eles nunca aparecem no arquivo nem no log
+          # da execucao: o proprio GitHub esconde esses valores.
+          TOKEN_DO_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ID_DO_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # O texto tambem chega por variavel de ambiente. Isso e importante:
+          # ele contem o titulo da PR, que e escrito por quem abre a PR. Se o
+          # texto fosse colado direto dentro do script, um titulo preparado com
+          # ma intencao poderia virar um comando executado pelo GitHub.
+          TEXTO: ${{ steps.mensagem.outputs.texto }}
+        run: |
+          # Se algum dos secrets estiver faltando, preferimos falhar com uma
+          # mensagem clara em vez de tentar enviar e receber um erro confuso
+          # da API do Telegram.
+          if [ -z "$TOKEN_DO_BOT" ] || [ -z "$ID_DO_CHAT" ]; then
+            echo "Os secrets TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID precisam estar cadastrados no repositorio."
+            exit 1
+          fi
+
+          # A opcao --fail faz o curl devolver erro quando a API do Telegram
+          # recusa a requisicao. Sem ela, o passo terminaria como sucesso mesmo
+          # que a mensagem nunca tivesse sido entregue.
+          curl --fail --silent --show-error \
+            -X POST "https://api.telegram.org/bot$TOKEN_DO_BOT/sendMessage" \
+            -d chat_id="$ID_DO_CHAT" \
+            -d parse_mode="HTML" \
+            -d disable_web_page_preview="true" \
+            --data-urlencode "text=$TEXTO"
