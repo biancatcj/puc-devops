@@ -1,0 +1,43 @@
+# Docker Compose sobe a aplicacao e o Redis juntos, com um unico comando.
+#
+# Isso e util porque a API nao funciona sozinha: ela depende do Redis para
+# guardar as travas. Com o Compose, quem for executar o projeto nao precisa
+# instalar o Redis na maquina nem subir cada parte separadamente.
+
+services:
+  # Servico do banco de dados em memoria que guarda as travas.
+  redis:
+    image: redis:7-alpine
+    container_name: pagamentos-redis
+    ports:
+      # Expomos a porta tambem na maquina local para facilitar a inspecao das
+      # chaves com o redis-cli durante o desenvolvimento.
+      - "6379:6379"
+    healthcheck:
+      # O Compose usa esta verificacao para saber quando o Redis esta pronto
+      # para aceitar conexoes.
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Servico da nossa API de pagamentos.
+  api:
+    build: .
+    container_name: pagamentos-api
+    ports:
+      # A porta 3001 da maquina leva para a porta 3000 de dentro do container.
+      # Usamos 3001 do lado de fora para nao conflitar com outros projetos que
+      # costumam ocupar a porta 3000.
+      - "3001:3000"
+    environment:
+      # Dentro da rede do Compose, um container alcanca o outro pelo nome do
+      # servico. Por isso o endereco e "redis" e nao "localhost": para a API,
+      # "localhost" seria o proprio container dela.
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+    depends_on:
+      redis:
+        # Esperamos o Redis ficar saudavel antes de subir a API, evitando que a
+        # aplicacao tente conectar em um Redis que ainda esta inicializando.
+        condition: service_healthy
