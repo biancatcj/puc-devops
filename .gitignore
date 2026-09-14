@@ -1,0 +1,17 @@
+# Dependências instaladas pelo npm
+node_modules/
+
+# Arquivos de log gerados em execução
+*.log
+npm-debug.log*
+
+# Variáveis de ambiente (podem conter segredos, por isso ficam fora do Git)
+.env
+.env.local
+
+# Relatórios de cobertura de testes
+coverage/
+
+# Arquivos de sistema operacional
+.DS_Store
+Thumbs.db
