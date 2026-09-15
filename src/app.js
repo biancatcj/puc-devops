@@ -8,6 +8,7 @@
 
 const express = require('express');
 const { adquirirTravaDoPagamento, liberarTrava } = require('./servicoDeTrava');
+const { validarPagamento } = require('./validadores');
 
 // Enquanto o objetivo do trabalho e demonstrar a trava distribuida, guardamos
 // os pagamentos ja processados em um mapa na memoria. Em um sistema real este
@@ -39,17 +40,12 @@ function criarAplicacao(conexaoComRedis) {
     const { faturaId, valor } = requisicao.body || {};
 
     // Passo 1: validar a entrada antes de qualquer outra coisa. Nao faz sentido
-    // ocupar o Redis com uma requisicao que ja sabemos estar incorreta.
-    if (!faturaId) {
-      return resposta
-        .status(400)
-        .json({ erro: 'O campo "faturaId" e obrigatorio.' });
-    }
+    // ocupar o Redis com uma requisicao que ja sabemos estar incorreta. As
+    // regras ficam no modulo validadores.js, o que permite testa-las sozinhas.
+    const validacao = validarPagamento(requisicao.body);
 
-    if (typeof valor !== 'number' || valor <= 0) {
-      return resposta
-        .status(400)
-        .json({ erro: 'O campo "valor" deve ser um numero maior que zero.' });
+    if (!validacao.valido) {
+      return resposta.status(400).json({ erro: validacao.erro });
     }
 
     // Passo 2: tentar adquirir a trava desta fatura.
